@@ -19,6 +19,10 @@ type AppAction =
   | { type: "ERROR"; message: string }
   | { type: "RESET" };
 
+// No `default` case on purpose: AppAction is a discriminated union, so
+// TypeScript checks these 4 cases are exhaustive on its own. Adding a new
+// action variant without a matching case here becomes a compile error
+// instead of a silent no-op at runtime.
 function reducer(state: AppState, action: AppAction): AppState {
   switch (action.type) {
     case "SUBMIT":
@@ -34,57 +38,34 @@ function reducer(state: AppState, action: AppAction): AppState {
 
 const initialState: AppState = { status: "idle" };
 
-// Stands in for the real POST /api/analyze call until build-order step 2 wires up stage 1.
-const FAKE_RESPONSE: AnalyzeResponse = {
-  rankedBullets: [
-    {
-      bulletText:
-        "Led the redesign of the checkout flow, reducing cart abandonment by 18%",
-      relevanceScore: 5,
-      relevanceReason:
-        "Directly matches the JD's focus on conversion and checkout optimization",
-      followUpQuestions: [
-        "How did you measure the 18% reduction, and what was your specific role in the redesign?",
-      ],
-      specificityScore: 5,
-      specificityNotes: "Concrete: has a clear metric and defined scope",
-    },
-    {
-      bulletText: "Worked on various frontend improvements across the platform",
-      relevanceScore: 3,
-      relevanceReason:
-        "Loosely related to frontend ownership, but doesn't name specific work",
-      followUpQuestions: [
-        "What specific improvements did you make?",
-        "Can you quantify the impact of this work?",
-      ],
-      specificityScore: 2,
-      specificityNotes:
-        "Vague: no specific features, scope, or measurable outcome",
-    },
-    {
-      bulletText: "Owned the migration to TypeScript for the core web app",
-      relevanceScore: 4,
-      relevanceReason:
-        "Matches the JD's mention of TypeScript migration experience",
-      followUpQuestions: [
-        'What was the scope of "the core web app" — one codebase or several?',
-      ],
-      specificityScore: 3,
-      specificityNotes:
-        'Ambiguous: "core web app" doesn\'t specify scope or team size',
-    },
-  ],
-};
-
 export default function Home() {
   const [state, dispatch] = useReducer(reducer, initialState);
 
-  const handleAnalyze = (resumeBullets: string[], jobDescription: string) => {
+  const handleAnalyze = async (
+    resumeBullets: string[],
+    jobDescription: string
+  ) => {
     dispatch({ type: "SUBMIT" });
-    setTimeout(() => {
-      dispatch({ type: "SUCCESS", data: FAKE_RESPONSE });
-    }, 800);
+
+    try {
+      const res = await fetch("/api/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ resumeBullets, jobDescription }),
+      });
+
+      if (!res.ok) {
+        const errorBody = await res.json().catch(() => null);
+        throw new Error(errorBody?.error ?? "Failed to analyze bullets.");
+      }
+
+      const data: AnalyzeResponse = await res.json();
+      dispatch({ type: "SUCCESS", data });
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Something went wrong.";
+      dispatch({ type: "ERROR", message });
+    }
   };
 
   const handleReset = () => dispatch({ type: "RESET" });

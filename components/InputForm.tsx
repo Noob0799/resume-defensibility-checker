@@ -20,6 +20,10 @@ const InputForm = ({ onSubmit, onReset, status }: InputFormProps) => {
   };
 
   const handleReset = () => {
+    // Two separate resets: this component owns resumeBullets/jobDescription
+    // as local state (lifted to the parent only on submit), so clearing
+    // them happens directly here. onReset() then tells the parent to reset
+    // its own reducer state, which this component has no access to.
     setResumeBullets("");
     setJobDescription("");
     onReset();
