@@ -1,15 +1,27 @@
-import Anthropic from "@anthropic-ai/sdk";
+import { ApiError, GoogleGenAI } from "@google/genai";
 import { AnalyzeRequest, AnalyzeResponse, RankedBullet } from "@/lib/types";
 
-// Two sequential Claude calls per request:
+// Two sequential Gemini calls per request:
 //  1. Rank every submitted bullet against the JD (buildRankingPrompt).
 //  2. Generate follow-up questions + specificity, but only for the
 //     top-ranked bullets from step 1 (buildDefensibilityPrompt).
 // Each call's raw text is parsed and validated independently before either
-// result is trusted — see callClaudeForJson / isValidRanking /
+// result is trusted — see callGeminiForJson / isValidRanking /
 // isValidDefensibility below.
+//
+// Uses Gemini (not Claude) specifically to stay on a genuinely free tier —
+// see the project discussion around 2026-09-15 for why.
+//
+// MODEL is pinned to a specific version rather than the "gemini-flash-latest"
+// alias. Verified live on 2026-09-20: "gemini-2.5-flash" is deprecated for
+// this key (Google's own error names "gemini-3.6-flash" as the replacement),
+// and "gemini-flash-latest" was returning 503 UNAVAILABLE ("high demand")
+// at the time — a pinned, known-working version is more reliable for a
+// live demo than an alias that can silently point at an overloaded model.
+// Worth re-checking this periodically as Google's lineup moves on.
 
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const genAI = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+const MODEL = "gemini-3.6-flash";
 
 // For now, the analysis only runs on the 3 top-ranked bullets, to keep its token cost down.
 const TOP_N_FOR_DEFENSIBILITY = 3;
@@ -25,7 +37,7 @@ type DefensibilityResult = Pick<
 >;
 
 /**
- * Type guard for Stage 1's parsed JSON. Claude is asked to return this exact
+ * Type guard for Stage 1's parsed JSON. Gemini is asked to return this exact
  * shape, but nothing enforces that — every field is checked explicitly
  * rather than trusted, so a malformed response fails loudly (502) instead
  * of reaching the frontend as bad data.
@@ -119,26 +131,102 @@ The array must have exactly ${bullets.length} entries, one per bullet, in the sa
 }
 
 /**
- * Sends one prompt to Claude and JSON.parses its text response. Returns
+ * Sends one prompt to Gemini and JSON.parses its text response. Returns
  * `unknown` deliberately — this doesn't validate the shape, so every caller
  * must run the result through the matching isValid* type guard before
  * trusting it (this function only guarantees "valid JSON", not "the JSON we
  * asked for").
  */
-async function callClaudeForJson(prompt: string): Promise<unknown> {
-  const message = await anthropic.messages.create({
-    model: "claude-sonnet-5",
-    max_tokens: 1024,
-    messages: [{ role: "user", content: prompt }],
+/** Thrown by callGeminiForJson when Gemini returns no text to parse at all
+ * (e.g. its safety filters blocked the response, or it hit max_tokens
+ * before producing any text) — distinct from a malformed-but-present
+ * response, which fails at JSON.parse instead. */
+class EmptyGeminiResponseError extends Error {}
+
+async function callGeminiForJson(prompt: string): Promise<unknown> {
+  const response = await genAI.models.generateContent({
+    model: MODEL,
+    contents: prompt,
+    // thinkingBudget: 0 disables this model's internal reasoning step.
+    // Verified via a direct API call that thinking tokens count against
+    // maxOutputTokens (115 total tokens for a 1-word answer, vs. 7 with
+    // this disabled) — for a fixed-shape JSON extraction task like ours,
+    // that reasoning doesn't help the output and was eating into the
+    // budget meant for the actual response.
+    config: { maxOutputTokens: 1024, thinkingConfig: { thinkingBudget: 0 } },
   });
 
-  const textBlock = message.content.find((block) => block.type === "text");
-
-  if (!textBlock) {
-    throw new Error("Claude did not return a text response.");
+  if (!response.text) {
+    throw new EmptyGeminiResponseError("Gemini did not return a text response.");
   }
 
-  return JSON.parse(textBlock.text);
+  return JSON.parse(response.text);
+}
+
+/**
+ * Turns a raw error thrown by callGeminiForJson into an HTTP status + a
+ * user-facing message that actually describes what went wrong. The
+ * "wasn't valid JSON" message is reserved for a genuine JSON.parse failure
+ * (SyntaxError) — every other failure mode (missing/invalid API key,
+ * unknown model, Gemini's own server errors, rate limits, a blocked or
+ * empty response) gets its own specific message instead of being lumped
+ * into that one, which was previously misleading (e.g. a rate limit or an
+ * auth failure both used to show "wasn't valid JSON", even though no
+ * response was ever returned to parse in either case).
+ */
+function classifyGeminiError(error: unknown): {
+  status: number;
+  message: string;
+} {
+  if (error instanceof ApiError) {
+    if (error.status === 429) {
+      return {
+        status: 429,
+        message:
+          "Gemini's free-tier rate limit was hit. Wait a minute and try again.",
+      };
+    }
+    if (error.status === 401 || error.status === 403) {
+      return {
+        status: 502,
+        message:
+          "Gemini rejected the request — the API key is missing, invalid, or lacks permission.",
+      };
+    }
+    if (error.status === 404) {
+      return {
+        status: 502,
+        message: "Gemini couldn't find the requested model.",
+      };
+    }
+    if (error.status >= 500) {
+      return {
+        status: 502,
+        message: "Gemini's servers had an error. Please try again in a moment.",
+      };
+    }
+    return {
+      status: 502,
+      message: `Gemini rejected the request (status ${error.status}).`,
+    };
+  }
+
+  if (error instanceof EmptyGeminiResponseError) {
+    return {
+      status: 502,
+      message:
+        "Gemini didn't return any content — it may have blocked the response or hit its output limit.",
+    };
+  }
+
+  if (error instanceof SyntaxError) {
+    return { status: 502, message: "Gemini's response wasn't valid JSON." };
+  }
+
+  return {
+    status: 502,
+    message: "Something went wrong talking to Gemini. Please try again.",
+  };
 }
 
 export async function POST(request: Request) {
@@ -162,19 +250,18 @@ export async function POST(request: Request) {
 
   let ranking: unknown;
   try {
-    ranking = await callClaudeForJson(
+    ranking = await callGeminiForJson(
       buildRankingPrompt(resumeBullets, jobDescription)
     );
-  } catch {
-    return Response.json(
-      { error: "Claude's ranking response was not valid JSON." },
-      { status: 502 }
-    );
+  } catch (error) {
+    console.error("Stage 1 (ranking) call failed:", error);
+    const { status, message } = classifyGeminiError(error);
+    return Response.json({ error: message }, { status });
   }
 
   if (!isValidRanking(ranking)) {
     return Response.json(
-      { error: "Claude's ranking response didn't match the expected shape." },
+      { error: "Gemini's ranking response didn't match the expected shape." },
       { status: 502 }
     );
   }
@@ -191,17 +278,16 @@ export async function POST(request: Request) {
 
   let defensibility: unknown;
   try {
-    defensibility = await callClaudeForJson(
+    defensibility = await callGeminiForJson(
       buildDefensibilityPrompt(
         topBullets.map((bullet) => bullet.bulletText),
         jobDescription
       )
     );
-  } catch {
-    return Response.json(
-      { error: "Claude's defensibility response was not valid JSON." },
-      { status: 502 }
-    );
+  } catch (error) {
+    console.error("Stage 2 (defensibility) call failed:", error);
+    const { status, message } = classifyGeminiError(error);
+    return Response.json({ error: message }, { status });
   }
 
   if (
@@ -211,7 +297,7 @@ export async function POST(request: Request) {
     return Response.json(
       {
         error:
-          "Claude's defensibility response didn't match the expected shape.",
+          "Gemini's defensibility response didn't match the expected shape.",
       },
       { status: 502 }
     );

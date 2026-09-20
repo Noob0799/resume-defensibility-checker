@@ -42,14 +42,26 @@ const BulletCard = ({ bullet }: BulletCardProps) => {
         {bullet.bulletText}
       </p>
 
-      <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">
-        {bullet.relevanceReason}
-      </p>
-      {bullet.specificityNotes && (
-        <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
-          {bullet.specificityNotes}
-        </p>
-      )}
+      <div className="mt-3 flex flex-col gap-2">
+        <div>
+          <p className="text-xs font-medium uppercase tracking-wide text-zinc-400">
+            Relevance
+          </p>
+          <p className="text-sm text-zinc-500 dark:text-zinc-400">
+            {bullet.relevanceReason}
+          </p>
+        </div>
+        {bullet.specificityNotes && (
+          <div>
+            <p className="text-xs font-medium uppercase tracking-wide text-zinc-400">
+              Specificity
+            </p>
+            <p className="text-sm text-zinc-500 dark:text-zinc-400">
+              {bullet.specificityNotes}
+            </p>
+          </div>
+        )}
+      </div>
 
       {hasFollowUps && (
         <>
@@ -80,7 +92,7 @@ const BulletCard = ({ bullet }: BulletCardProps) => {
               <p className="text-xs font-medium uppercase tracking-wide text-zinc-400">
                 Likely follow-up
               </p>
-              <ul className="mt-1 flex flex-col gap-1">
+              <ul className="mt-1 flex list-disc flex-col gap-1.5 pl-5 marker:text-zinc-400 dark:marker:text-zinc-600">
                 {bullet.followUpQuestions?.map((question, index) => (
                   <li
                     key={index}

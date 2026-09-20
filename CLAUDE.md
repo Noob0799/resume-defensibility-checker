@@ -12,14 +12,17 @@ is one he was already doing by hand.
 
 - Next.js (App Router) + React + TypeScript — one codebase for frontend and
   API route.
-- LLM: Anthropic Claude API.
+- LLM: Google Gemini API (`@google/genai`, model `gemini-flash-latest`) —
+  switched from the originally-planned Anthropic Claude API on 2026-09-15
+  specifically to stay on a genuinely free tier rather than pay-as-you-go
+  billing. See `app/api/analyze/route.ts` for the implementation.
 - No database, no auth, no persistence for v1 — resume/JD text lives in
   memory for the session only.
 - Deploy target: Vercel.
 
 ## Architecture
 
-Two-stage LLM pipeline inside `app/api/analyze/route.ts` (not yet created):
+Two-stage LLM pipeline inside `app/api/analyze/route.ts`:
 
 1. **Ranking** — one LLM call, given the full bullet list + JD, ranks bullets
    by relevance to this JD with a one-line reason each.

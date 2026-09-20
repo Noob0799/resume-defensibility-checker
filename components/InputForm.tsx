@@ -9,6 +9,7 @@ const labelClasses = "text-sm font-medium text-zinc-700 dark:text-zinc-300";
 const InputForm = ({ onSubmit, onReset, status }: InputFormProps) => {
   const [resumeBullets, setResumeBullets] = useState("");
   const [jobDescription, setJobDescription] = useState("");
+  const isLoading = status === "loading";
 
   const handleSubmit = (e: SubmitEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -64,15 +65,23 @@ const InputForm = ({ onSubmit, onReset, status }: InputFormProps) => {
       <div className="flex items-center gap-3">
         <button
           type="submit"
-          className="cursor-pointer self-start rounded-full bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-400 focus:ring-offset-2 dark:focus:ring-offset-zinc-950"
+          disabled={isLoading}
+          className="flex cursor-pointer items-center gap-2 self-start rounded-full bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-blue-600 dark:focus:ring-offset-zinc-950"
         >
-          Analyze bullets
+          {isLoading && (
+            <span
+              className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/40 border-t-white"
+              aria-hidden="true"
+            />
+          )}
+          {isLoading ? "Analyzing" : "Analyze bullets"}
         </button>
         {status !== "idle" && (
           <button
             type="button"
             onClick={handleReset}
-            className="cursor-pointer self-start rounded-full bg-zinc-100 px-5 py-2.5 text-sm font-semibold text-zinc-700 transition-colors hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700"
+            disabled={isLoading}
+            className="cursor-pointer self-start rounded-full bg-zinc-100 px-5 py-2.5 text-sm font-semibold text-zinc-700 transition-colors hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-zinc-100 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700 dark:disabled:hover:bg-zinc-800"
           >
             Reset
           </button>
