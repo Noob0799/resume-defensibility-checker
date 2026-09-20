@@ -11,6 +11,9 @@ export interface RankedBullet {
     bulletText: string;
     relevanceScore: number;     // 1-5, how well it matches this JD
     relevanceReason: string;     // one line: why it's relevant
+    // The model only generates these for bullets it scores relevanceScore
+    // >= 3 (see the prompt in app/api/analyze/route.ts) — absent, not
+    // empty, for bullets below that threshold.
     followUpQuestions?: string[]; // 2-3 skeptical interviewer questions
     specificityScore?: number;    // 1-5, concrete vs vague/overclaiming
     specificityNotes?: string;    // what's vague/ambiguous, or why it's concrete

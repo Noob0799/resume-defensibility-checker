@@ -12,8 +12,9 @@ is one he was already doing by hand.
 
 - Next.js (App Router) + React + TypeScript — one codebase for frontend and
   API route.
-- LLM: Google Gemini API (`@google/genai`, model `gemini-flash-latest`) —
-  switched from the originally-planned Anthropic Claude API on 2026-09-15
+- LLM: Google Gemini API (`@google/genai`, model `gemini-3.6-flash`, pinned
+  rather than using the `gemini-flash-latest` alias — see route.ts for why)
+  — switched from the originally-planned Anthropic Claude API on 2026-09-15
   specifically to stay on a genuinely free tier rather than pay-as-you-go
   billing. See `app/api/analyze/route.ts` for the implementation.
 - No database, no auth, no persistence for v1 — resume/JD text lives in
@@ -22,13 +23,23 @@ is one he was already doing by hand.
 
 ## Architecture
 
-Two-stage LLM pipeline inside `app/api/analyze/route.ts`:
+One LLM call inside `app/api/analyze/route.ts`, given the full bullet list +
+JD: scores every bullet's relevance (1-5 + one-line reason), and generates
+defensibility analysis (2-3 follow-up questions, a specificity score, and
+specificity notes) for whichever bullets it scores `relevanceScore >= 3` —
+that threshold is stated directly in the prompt, so the model itself
+decides per-bullet, independently, whether to include those three fields.
 
-1. **Ranking** — one LLM call, given the full bullet list + JD, ranks bullets
-   by relevance to this JD with a one-line reason each.
-2. **Defensibility** — a second LLM call, but ONLY on the top-ranked bullets
-   from stage 1 — generates 2-3 likely interviewer follow-up questions, a
-   specificity score, and specificity notes.
+This used to be two sequential calls — ranking first, then a second call
+generating defensibility only for the top-ranked bullets — merged into one
+call on 2026-09-20 (the free tier's binding constraint turned out to be RPD,
+requests/day, not token volume, so halving the request count mattered more
+than trimming tokens). The selection mechanism changed again shortly after:
+initially our own code picked a fixed top-N after the merged call returned,
+but since a per-bullet threshold is a simpler ask for the model than
+self-selecting "the top N" (no need to compare bullets against each other),
+the threshold now lives in the prompt itself and there's no server-side
+trim step at all — whatever the model includes is what's returned.
 
 ## API contract
 

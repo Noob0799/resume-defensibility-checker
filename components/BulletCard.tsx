@@ -13,11 +13,10 @@ const specificityBadgeClasses = (score: number) => {
 
 const BulletCard = ({ bullet }: BulletCardProps) => {
   const [isOpen, setIsOpen] = useState(true);
-  // followUpQuestions/specificityScore/specificityNotes are optional on
-  // RankedBullet: the API only runs the defensibility analysis on the
-  // top-ranked bullets, so most bullets in a large list won't have this
-  // data at all — this section (and the specificity badge/notes above)
-  // just don't render for those.
+  // The relevanceScore >= 3 eligibility rule lives entirely server-side
+  // (see sanitizeAnalysis in the API route) — it guarantees these fields
+  // are only ever present when a bullet qualifies, so this component just
+  // trusts field presence rather than re-deriving the same rule here.
   const hasFollowUps =
     bullet.followUpQuestions && bullet.followUpQuestions.length > 0;
 
@@ -63,7 +62,7 @@ const BulletCard = ({ bullet }: BulletCardProps) => {
         )}
       </div>
 
-      {hasFollowUps && (
+      {hasFollowUps ? (
         <>
           <hr className="my-3 border-zinc-200 dark:border-zinc-800" />
 
@@ -104,6 +103,13 @@ const BulletCard = ({ bullet }: BulletCardProps) => {
               </ul>
             </div>
           )}
+        </>
+      ) : (
+        <>
+          <hr className="my-3 border-zinc-200 dark:border-zinc-800" />
+          <p className="text-xs text-zinc-400 dark:text-zinc-500">
+            Relevance below 3/5 — no defensibility check for this bullet.
+          </p>
         </>
       )}
     </div>

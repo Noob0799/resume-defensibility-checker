@@ -112,12 +112,19 @@ export default function Home() {
             {state.status === "error" && <ErrorState message={state.message} />}
             {state.status === "results" && (
               <>
-                <h2 className="text-base font-semibold text-zinc-900 dark:text-zinc-50">
-                  Results{" "}
-                  <span className="font-normal text-zinc-500 dark:text-zinc-400">
-                    — {state.data.rankedBullets.length} bullets ranked
-                  </span>
-                </h2>
+                <div>
+                  <h2 className="text-base font-semibold text-zinc-900 dark:text-zinc-50">
+                    Results{" "}
+                    <span className="font-normal text-zinc-500 dark:text-zinc-400">
+                      — {state.data.rankedBullets.length} bullets ranked
+                    </span>
+                  </h2>
+                  <p className="mt-1 text-xs text-zinc-400 dark:text-zinc-500">
+                    Bullets scoring 3/5 or higher on relevance also get a
+                    defensibility check — follow-up questions and a
+                    specificity rating.
+                  </p>
+                </div>
                 <ResultsList rankedBullets={state.data.rankedBullets} />
               </>
             )}

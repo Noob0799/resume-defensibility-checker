@@ -92,13 +92,17 @@ Assisted in improving reliability of the platform
 
 ## 4. Edge cases
 
-- **Single bullet only** (fewer than `TOP_N_FOR_DEFENSIBILITY`):
+- **Single strong bullet only** (should score relevanceScore >= 3 and get
+  the full follow-up/specificity treatment):
   ```
   Cut API p95 latency from 800ms to 210ms by adding Redis caching to the pricing service
   ```
 
-- **More than 3 bullets** (to confirm only the top 3 get follow-up
-  questions/specificity, and the rest render with relevance only):
+- **A mix of strong and weak bullets** (to confirm bullets scoring
+  `relevanceScore >= 3` get follow-up questions/specificity and the rest
+  render with relevance only — the split is decided by the model per the
+  prompt's threshold, not a fixed count, so the number of bullets that get
+  the full treatment can vary):
   ```
   Cut API p95 latency from 800ms to 210ms by adding Redis caching to the pricing service
   Migrated the CI pipeline from Jenkins to GitHub Actions, reducing average build time from 14 to 6 minutes

@@ -1,13 +1,24 @@
 import { ApiError, GoogleGenAI } from "@google/genai";
 import { AnalyzeRequest, AnalyzeResponse, RankedBullet } from "@/lib/types";
 
-// Two sequential Gemini calls per request:
-//  1. Rank every submitted bullet against the JD (buildRankingPrompt).
-//  2. Generate follow-up questions + specificity, but only for the
-//     top-ranked bullets from step 1 (buildDefensibilityPrompt).
-// Each call's raw text is parsed and validated independently before either
-// result is trusted — see callGeminiForJson / isValidRanking /
-// isValidDefensibility below.
+// One Gemini call per request. This used to be two sequential calls (rank,
+// then a separate defensibility pass on the top-ranked bullets) — merged on
+// 2026-09-20 because the free tier's binding constraint turned out to be
+// RPD (requests/day), not token volume, so halving the request count
+// mattered more than trimming tokens.
+//
+// The model is asked to decide per-bullet whether to include defensibility
+// fields (follow-up questions + specificity), based on a threshold stated
+// in the prompt: relevanceScore >= 3. This was chosen over having the model
+// self-select "the top N bullets" because it's a simple absolute rule
+// applied independently to each bullet, not a relative judgment across the
+// whole set — the model doesn't need to compare bullets against each other
+// or agree with itself on a cutoff, just check the score it already gave
+// this one bullet. That said, the prompt only asks — sanitizeAnalysis
+// (below) is what actually enforces the >= 3 rule server-side and drops
+// any malformed or rule-violating defensibility data per bullet, rather
+// than trusting the model's compliance or failing the whole request over
+// one bullet's imperfection.
 //
 // Uses Gemini (not Claude) specifically to stay on a genuinely free tier —
 // see the project discussion around 2026-09-15 for why.
@@ -21,65 +32,80 @@ import { AnalyzeRequest, AnalyzeResponse, RankedBullet } from "@/lib/types";
 // Worth re-checking this periodically as Google's lineup moves on.
 
 const genAI = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-const MODEL = "gemini-3.6-flash";
-
-// For now, the analysis only runs on the 3 top-ranked bullets, to keep its token cost down.
-const TOP_N_FOR_DEFENSIBILITY = 3;
-
-type RankingResult = Pick<
-  RankedBullet,
-  "bulletText" | "relevanceScore" | "relevanceReason"
->;
-
-type DefensibilityResult = Pick<
-  RankedBullet,
-  "followUpQuestions" | "specificityScore" | "specificityNotes"
->;
+const MODEL = "gemini-3.8-flash";
 
 /**
- * Type guard for Stage 1's parsed JSON. Gemini is asked to return this exact
- * shape, but nothing enforces that — every field is checked explicitly
- * rather than trusted, so a malformed response fails loudly (502) instead
- * of reaching the frontend as bad data.
+ * Validates and cleans up the parsed JSON, per bullet, rather than
+ * rejecting the whole response over one bullet's imperfect data.
+ *
+ * bulletText/relevanceScore/relevanceReason are non-negotiable — if any
+ * bullet is missing them or has them wrongly typed, there's no sensible
+ * bullet to show, so the whole response is rejected (returns null).
+ *
+ * The three defensibility fields are treated as advisory, not trusted:
+ * they're kept only when the model both (a) actually sent all three,
+ * well-typed, AND (b) scored that bullet relevanceScore >= 3 — the same
+ * threshold stated in the prompt. If the model attaches them despite a low
+ * score, or sends a partial/malformed set for any one bullet, they're just
+ * dropped for that bullet rather than failing the entire request. This is
+ * also the authoritative enforcement of the >= 3 rule: the prompt asks the
+ * model to follow it, but this function is what actually guarantees it,
+ * regardless of whether the model complies.
  */
-function isValidRanking(value: unknown): value is RankingResult[] {
-  return (
-    Array.isArray(value) &&
-    value.every(
-      (item) =>
-        typeof item === "object" &&
-        item !== null &&
-        typeof (item as Record<string, unknown>).bulletText === "string" &&
-        typeof (item as Record<string, unknown>).relevanceScore === "number" &&
-        typeof (item as Record<string, unknown>).relevanceReason === "string"
-    )
-  );
+function sanitizeAnalysis(value: unknown): RankedBullet[] | null {
+  if (!Array.isArray(value)) return null;
+
+  const bullets: RankedBullet[] = [];
+
+  for (const item of value) {
+    if (typeof item !== "object" || item === null) return null;
+    const record = item as Record<string, unknown>;
+
+    if (
+      typeof record.bulletText !== "string" ||
+      typeof record.relevanceScore !== "number" ||
+      typeof record.relevanceReason !== "string"
+    ) {
+      return null;
+    }
+
+    const bullet: RankedBullet = {
+      bulletText: record.bulletText,
+      relevanceScore: record.relevanceScore,
+      relevanceReason: record.relevanceReason,
+    };
+
+    const hasWellFormedDefensibility =
+      Array.isArray(record.followUpQuestions) &&
+      record.followUpQuestions.every((q) => typeof q === "string") &&
+      typeof record.specificityScore === "number" &&
+      typeof record.specificityNotes === "string";
+
+    if (bullet.relevanceScore >= 3 && hasWellFormedDefensibility) {
+      bullet.followUpQuestions = record.followUpQuestions as string[];
+      bullet.specificityScore = record.specificityScore as number;
+      bullet.specificityNotes = record.specificityNotes as string;
+    }
+
+    bullets.push(bullet);
+  }
+
+  return bullets;
 }
 
-/** Same purpose as isValidRanking, for Stage 2's parsed JSON. */
-function isValidDefensibility(value: unknown): value is DefensibilityResult[] {
-  return (
-    Array.isArray(value) &&
-    value.every((item) => {
-      if (typeof item !== "object" || item === null) return false;
-      const record = item as Record<string, unknown>;
-      return (
-        Array.isArray(record.followUpQuestions) &&
-        record.followUpQuestions.every((q) => typeof q === "string") &&
-        typeof record.specificityScore === "number" &&
-        typeof record.specificityNotes === "string"
-      );
-    })
-  );
-}
-
-/** Stage 1 prompt: score every submitted bullet's relevance to the JD. */
-function buildRankingPrompt(resumeBullets: string[], jobDescription: string) {
+/**
+ * Combined prompt: for every bullet, score relevance against the JD, and
+ * conditionally generate defensibility analysis (follow-up questions +
+ * specificity) only for bullets scoring 3 or higher — see the note at the
+ * top of this file on why a per-bullet threshold instead of the model
+ * picking "the top ones" itself.
+ */
+function buildAnalysisPrompt(resumeBullets: string[], jobDescription: string) {
   const bulletList = resumeBullets
     .map((bullet, index) => `${index + 1}. ${bullet}`)
     .join("\n");
 
-  return `You are helping a job seeker evaluate how well their resume bullets match a job description.
+  return `You are helping a job seeker evaluate their resume bullets against a job description, and preparing them to defend those bullets under skeptical interview questioning.
 
 Job description:
 """
@@ -89,60 +115,36 @@ ${jobDescription}
 Resume bullets:
 ${bulletList}
 
-For each bullet, score how relevant it is to this job description on a 1-5 scale (5 = directly matches a core requirement in the JD, 1 = unrelated to the JD), and give a one-line reason for the score.
+For EACH bullet:
+1. Score how relevant it is to this job description on a 1-5 scale (5 = directly matches a core requirement in the JD, 1 = unrelated to the JD), and give a one-line reason for the score.
+2. If — and only if — that relevance score is 3 or higher, ALSO:
+   a. Write 2-3 specific, skeptical follow-up questions an interviewer would likely ask to test whether the claim is real and the candidate can defend it — e.g. their specific role versus the team's, how a metric was actually measured, or what a vague word like "several" or "large" really means here.
+   b. Score how specific and concrete the bullet is on a 1-5 scale (5 = concrete, with a clear metric and defined scope; 1 = vague, unverifiable, or likely overclaiming), and give a one-line note explaining what's vague or why it's concrete.
+   If the relevance score is below 3, do NOT include followUpQuestions, specificityScore, or specificityNotes for that bullet at all — omit those three keys entirely rather than leaving them empty.
 
-Respond with ONLY a JSON array, no other text before or after it, in exactly this shape:
-[
-  { "bulletText": "<the original bullet, unchanged>", "relevanceScore": <integer 1-5>, "relevanceReason": "<one line>" }
-]
+Respond with ONLY a JSON array, no other text before or after it. Every entry must always have "bulletText", "relevanceScore", and "relevanceReason". Entries for bullets scoring 3 or higher must ALSO include "followUpQuestions", "specificityScore", and "specificityNotes". Entries for bullets scoring below 3 must NOT include those three keys.
+
+Example entry for a bullet scoring 3 or higher:
+{ "bulletText": "<original text>", "relevanceScore": 4, "relevanceReason": "<one line>", "followUpQuestions": ["<question>", "<question>"], "specificityScore": 3, "specificityNotes": "<one line>" }
+
+Example entry for a bullet scoring below 3:
+{ "bulletText": "<original text>", "relevanceScore": 2, "relevanceReason": "<one line>" }
 
 The array must have exactly ${resumeBullets.length} entries, one per bullet, in the same order as listed above.`;
 }
 
-/**
- * Stage 2 prompt: generates follow-up questions + specificity for whichever
- * bullets the caller passes in — the caller (POST below) is responsible for
- * only passing the top-ranked ones.
- */
-function buildDefensibilityPrompt(bullets: string[], jobDescription: string) {
-  const bulletList = bullets
-    .map((bullet, index) => `${index + 1}. ${bullet}`)
-    .join("\n");
-
-  return `You are a skeptical technical interviewer preparing to question a candidate about their resume, for a role with this job description:
-
-"""
-${jobDescription}
-"""
-
-For each of the following resume bullets:
-1. Write 2-3 specific, skeptical follow-up questions an interviewer would likely ask to test whether the claim is real and the candidate can defend it — e.g. their specific role versus the team's, how a metric was actually measured, or what a vague word like "several" or "large" really means here.
-2. Score how specific and concrete the bullet is on a 1-5 scale (5 = concrete, with a clear metric and defined scope; 1 = vague, unverifiable, or likely overclaiming), and give a one-line note explaining what's vague or why it's concrete.
-
-Bullets:
-${bulletList}
-
-Respond with ONLY a JSON array, no other text before or after it, in exactly this shape:
-[
-  { "followUpQuestions": ["<question>", "<question>"], "specificityScore": <integer 1-5>, "specificityNotes": "<one line>" }
-]
-
-The array must have exactly ${bullets.length} entries, one per bullet, in the same order as listed above.`;
-}
-
-/**
- * Sends one prompt to Gemini and JSON.parses its text response. Returns
- * `unknown` deliberately — this doesn't validate the shape, so every caller
- * must run the result through the matching isValid* type guard before
- * trusting it (this function only guarantees "valid JSON", not "the JSON we
- * asked for").
- */
 /** Thrown by callGeminiForJson when Gemini returns no text to parse at all
  * (e.g. its safety filters blocked the response, or it hit max_tokens
  * before producing any text) — distinct from a malformed-but-present
  * response, which fails at JSON.parse instead. */
 class EmptyGeminiResponseError extends Error {}
 
+/**
+ * Sends one prompt to Gemini and JSON.parses its text response. Returns
+ * `unknown` deliberately — this doesn't validate the shape, so the caller
+ * must run the result through sanitizeAnalysis before trusting it (this
+ * function only guarantees "valid JSON", not "the JSON we asked for").
+ */
 async function callGeminiForJson(prompt: string): Promise<unknown> {
   const response = await genAI.models.generateContent({
     model: MODEL,
@@ -153,7 +155,7 @@ async function callGeminiForJson(prompt: string): Promise<unknown> {
     // this disabled) — for a fixed-shape JSON extraction task like ours,
     // that reasoning doesn't help the output and was eating into the
     // budget meant for the actual response.
-    config: { maxOutputTokens: 1024, thinkingConfig: { thinkingBudget: 0 } },
+    config: { maxOutputTokens: 2048, thinkingConfig: { thinkingBudget: 0 } },
   });
 
   if (!response.text) {
@@ -248,74 +250,30 @@ export async function POST(request: Request) {
     );
   }
 
-  let ranking: unknown;
+  let analysis: unknown;
   try {
-    ranking = await callGeminiForJson(
-      buildRankingPrompt(resumeBullets, jobDescription)
+    analysis = await callGeminiForJson(
+      buildAnalysisPrompt(resumeBullets, jobDescription)
     );
   } catch (error) {
-    console.error("Stage 1 (ranking) call failed:", error);
+    console.error("Analysis call failed:", error);
     const { status, message } = classifyGeminiError(error);
     return Response.json({ error: message }, { status });
   }
 
-  if (!isValidRanking(ranking)) {
+  const sanitized = sanitizeAnalysis(analysis);
+
+  if (!sanitized || sanitized.length !== resumeBullets.length) {
     return Response.json(
-      { error: "Gemini's ranking response didn't match the expected shape." },
+      { error: "Gemini's response didn't match the expected shape." },
       { status: 502 }
     );
   }
 
-  const rankedBullets: RankedBullet[] = [...ranking].sort(
+  const rankedBullets: RankedBullet[] = sanitized.sort(
     (a, b) => b.relevanceScore - a.relevanceScore
   );
 
-  // .slice() copies the array, not the objects inside it — topBullets[i]
-  // and rankedBullets[i] are the SAME object for i < TOP_N_FOR_DEFENSIBILITY.
-  // That's intentional: it's what lets the Object.assign below update both
-  // arrays through one mutation instead of writing a separate merge step.
-  const topBullets = rankedBullets.slice(0, TOP_N_FOR_DEFENSIBILITY);
-
-  let defensibility: unknown;
-  try {
-    defensibility = await callGeminiForJson(
-      buildDefensibilityPrompt(
-        topBullets.map((bullet) => bullet.bulletText),
-        jobDescription
-      )
-    );
-  } catch (error) {
-    console.error("Stage 2 (defensibility) call failed:", error);
-    const { status, message } = classifyGeminiError(error);
-    return Response.json({ error: message }, { status });
-  }
-
-  if (
-    !isValidDefensibility(defensibility) ||
-    defensibility.length !== topBullets.length
-  ) {
-    return Response.json(
-      {
-        error:
-          "Gemini's defensibility response didn't match the expected shape.",
-      },
-      { status: 502 }
-    );
-  }
-
-  // Merges Stage 2's fields onto the existing Stage 1 objects in place —
-  // it doesn't replace them, so bulletText/relevanceScore/relevanceReason
-  // are untouched. Because topBullets shares references with rankedBullets
-  // (see above), this also updates the matching entries in rankedBullets.
-  defensibility.forEach((result, index) => {
-    Object.assign(topBullets[index], result);
-  });
-
-  // rankedBullets holds every submitted bullet, not just the top-ranked
-  // ones — only the first TOP_N_FOR_DEFENSIBILITY entries carry
-  // followUpQuestions/specificityScore/specificityNotes after the merge
-  // above; the rest are Stage 1 data only (those fields are optional on
-  // RankedBullet for exactly this reason — see lib/types.ts).
   const response: AnalyzeResponse = { rankedBullets };
 
   return Response.json(response);
