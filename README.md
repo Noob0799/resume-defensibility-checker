@@ -1,36 +1,34 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Resume Tailor + Defensibility Checker
 
-## Getting Started
+**[Live demo →](https://resume-defensibility-checker.vercel.app/)**
 
-First, run the development server:
+Paste your resume bullets and a job description. Every bullet gets ranked by relevance to the JD, and anything relevant enough gets stress-tested for how it would hold up under interview questioning — a specificity score, notes on what's vague, and the follow-up questions an interviewer would likely ask.
+
+Built as a portfolio project for my own job search: tailoring bullets against a JD, then stress-testing them for defensibility, is a workflow I was already doing by hand.
+
+## How it works
+
+Paste resume bullets and a job description, and Gemini scores every bullet's relevance to the JD (1-5, with a one-line reason) in a single call. Bullets scoring 3 or higher also get a defensibility pass: a specificity score (1-5), notes on what's vague or concrete, and 2-3 skeptical follow-up questions an interviewer would likely ask.
+
+## Tech stack
+
+**Next.js (App Router) + React + TypeScript** for one codebase covering the frontend and the API route, the **Google Gemini API** (`@google/genai`) for ranking and defensibility analysis on a free-tier model, and **Vercel** for deployment. No database, no auth, no persistence — resume/JD text lives in memory for the session only.
+
+## Local development
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open http://localhost:3000. You'll need a `GEMINI_API_KEY` in your environment — see `app/api/analyze/route.ts`.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## API
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+`POST /api/analyze`
 
-## Learn More
+```
+{ resumeBullets: string[], jobDescription: string } → { rankedBullets: RankedBullet[] }
+```
 
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Types are defined in `lib/types.ts` and shared between the frontend and the API route.
